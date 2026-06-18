@@ -71,6 +71,18 @@
   .iconbtn.spin svg{animation:spin .9s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
 
+  .filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;-webkit-overflow-scrolling:touch;}
+  .filters::-webkit-scrollbar{display:none;}
+  .chip{flex:none;display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line);
+    color:var(--text-dim);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+  .chip img{width:16px;height:16px;border-radius:50%;object-fit:cover;}
+  .chip[aria-pressed="true"]{background:var(--accent-dim);border-color:var(--accent);color:var(--accent);}
+
+  .loadmore-btn{display:block;width:100%;background:var(--surface);border:1px solid var(--line);
+    color:var(--text);border-radius:10px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;
+    margin-bottom:24px;}
+  .loadmore-btn:hover{border-color:var(--accent);color:var(--accent);}
+
   .empty{border:1px dashed var(--line);border-radius:var(--radius);padding:36px 18px;
     text-align:center;color:var(--text-dim);font-size:14px;line-height:1.6;}
   .empty button{margin-top:14px;background:var(--accent-dim);color:var(--accent);border:1px solid var(--accent);
@@ -161,7 +173,9 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 12a9 9 0 1 1 2.64 6.36"/><path d="M3 21v-6h6"/></svg>
       </button>
     </div>
+    <div class="filters" id="channel-filters"></div>
     <div id="feed-list"></div>
+    <div id="loadmore-wrap"></div>
   </main>
 
   <main id="view-channels" hidden>
@@ -242,7 +256,9 @@
     channels: loadJSON(LS.channels, []),       // [{id,title,thumb,uploads}]
     videos: loadJSON(LS.cache, []),            // flat list, newest first
     hideShorts: loadJSON(LS.hideShorts, false),
-    lastFetch: loadJSON("mytube_last_fetch", null)
+    lastFetch: loadJSON("mytube_last_fetch", null),
+    activeFilter: "all",                       // "all" or a channel id
+    pageTokens: {}                             // channelId -> nextPageToken, for "load more"
   };
 
   // ---------- helpers ----------
@@ -361,12 +377,14 @@
     });
   }
 
-  function fetchChannelVideos(channel, maxResults){
-    return apiGet("/playlistItems", {
+  function fetchChannelVideos(channel, maxResults, pageToken){
+    var params = {
       part: "snippet,contentDetails",
       playlistId: channel.uploads,
       maxResults: maxResults || 12
-    }).then(function(json){
+    };
+    if(pageToken) params.pageToken = pageToken;
+    return apiGet("/playlistItems", params).then(function(json){
       var items = (json.items || []).filter(function(it){
         return it.contentDetails && it.contentDetails.videoId;
       });
@@ -384,7 +402,8 @@
           durationSec: 0
         };
       });
-      if(!videos.length) return videos;
+      var nextPageToken = json.nextPageToken || null;
+      if(!videos.length) return { videos: videos, nextPageToken: nextPageToken };
       var ids = videos.map(function(v){ return v.videoId; }).join(",");
       return apiGet("/videos", { part: "contentDetails", id: ids }).then(function(vjson){
         var durMap = {};
@@ -392,8 +411,8 @@
           durMap[it.id] = parseISODuration(it.contentDetails.duration);
         });
         videos.forEach(function(v){ v.durationSec = durMap[v.videoId] || 0; });
-        return videos;
-      }).catch(function(){ return videos; }); // duration lookup failing shouldn't block the feed
+        return { videos: videos, nextPageToken: nextPageToken };
+      }).catch(function(){ return { videos: videos, nextPageToken: nextPageToken }; }); // duration lookup failing shouldn't block the feed
     });
   }
 
@@ -404,9 +423,14 @@
     }
     if(!state.channels.length) return Promise.resolve();
     setLoading(true);
+    state.pageTokens = {};
     var jobs = state.channels.map(function(ch){
-      return fetchChannelVideos(ch, 12).catch(function(err){
+      return fetchChannelVideos(ch, 12).then(function(result){
+        state.pageTokens[ch.id] = result.nextPageToken;
+        return result.videos;
+      }).catch(function(err){
         console.warn("channel fetch failed", ch.title, err);
+        state.pageTokens[ch.id] = null;
         return [];
       });
     });
@@ -421,9 +445,49 @@
     }).finally(function(){ setLoading(false); });
   }
 
+  function hasMore(){
+    return state.channels.some(function(ch){ return !!state.pageTokens[ch.id]; });
+  }
+
+  function loadMore(){
+    var pending = state.channels.filter(function(ch){ return state.pageTokens[ch.id]; });
+    if(!pending.length) return Promise.resolve();
+    setLoading(true);
+    var jobs = pending.map(function(ch){
+      return fetchChannelVideos(ch, 12, state.pageTokens[ch.id]).then(function(result){
+        state.pageTokens[ch.id] = result.nextPageToken;
+        return result.videos;
+      }).catch(function(err){
+        console.warn("load more failed", ch.title, err);
+        state.pageTokens[ch.id] = null;
+        return [];
+      });
+    });
+    return Promise.all(jobs).then(function(lists){
+      var fresh = [].concat.apply([], lists);
+      var seen = {};
+      state.videos.forEach(function(v){ seen[v.videoId] = true; });
+      fresh.forEach(function(v){
+        if(!seen[v.videoId]){ state.videos.push(v); seen[v.videoId] = true; }
+      });
+      state.videos.sort(function(a,b){ return new Date(b.publishedAt) - new Date(a.publishedAt); });
+      saveJSON(LS.cache, state.videos);
+      renderFeed();
+    }).finally(function(){ setLoading(false); });
+  }
+
   // ---------- rendering ----------
   function renderFeed(){
+    if(state.activeFilter !== "all" && !state.channels.some(function(c){ return c.id === state.activeFilter; })){
+      state.activeFilter = "all";
+    }
+    renderFilters();
+    renderLoadMore();
+
     var list = state.videos.slice();
+    if(state.activeFilter !== "all"){
+      list = list.filter(function(v){ return v.channelId === state.activeFilter; });
+    }
     if(state.hideShorts){
       list = list.filter(function(v){ return !(v.durationSec > 0 && v.durationSec <= 60); });
     }
@@ -469,6 +533,42 @@
       card.addEventListener("click", function(){
         var v = list[parseInt(card.getAttribute("data-idx"), 10)];
         if(v) openPlayer(v.videoId);
+      });
+    });
+  }
+
+  function renderLoadMore(){
+    var el = $("loadmore-wrap");
+    if(!el) return;
+    if(!state.channels.length || !hasMore()){
+      el.innerHTML = "";
+      return;
+    }
+    el.innerHTML = '<button class="loadmore-btn" id="loadmore-btn">더 보기</button>';
+    $("loadmore-btn").addEventListener("click", function(){ loadMore(); });
+  }
+
+  function renderFilters(){
+    var el = $("channel-filters");
+    if(!el) return;
+    if(state.channels.length < 2){
+      el.innerHTML = "";
+      return;
+    }
+    var chips = ['<button class="chip" data-id="all" aria-pressed="'+(state.activeFilter === "all" ? "true" : "false")+'">전체</button>'];
+    state.channels.forEach(function(ch){
+      chips.push(
+        '<button class="chip" data-id="'+escapeHTML(ch.id)+'" aria-pressed="'+(state.activeFilter === ch.id ? "true" : "false")+'">' +
+          (ch.thumb ? '<img src="'+escapeHTML(ch.thumb)+'" alt="">' : "") +
+          '<span>'+escapeHTML(ch.title)+'</span>' +
+        '</button>'
+      );
+    });
+    el.innerHTML = chips.join("");
+    Array.prototype.forEach.call(el.querySelectorAll(".chip"), function(btn){
+      btn.addEventListener("click", function(){
+        state.activeFilter = btn.getAttribute("data-id");
+        renderFeed();
       });
     });
   }
