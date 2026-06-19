@@ -653,6 +653,22 @@
       copyCurrentVideoLink();
     }
   }
+  function legacyCopy(text){
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.left = "-1000px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    var ok = false;
+    try{ ok = document.execCommand("copy"); }catch(e){ ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
   function copyCurrentVideoLink(){
     var url = currentVideoUrl();
     if(!url) return;
@@ -660,8 +676,11 @@
       navigator.clipboard.writeText(url).then(function(){
         toast("링크를 복사했어요");
       }).catch(function(){
-        window.prompt("이 링크를 복사하세요:", url);
+        if(legacyCopy(url)) toast("링크를 복사했어요");
+        else window.prompt("이 링크를 복사하세요:", url);
       });
+    } else if(legacyCopy(url)){
+      toast("링크를 복사했어요");
     } else {
       window.prompt("이 링크를 복사하세요:", url);
     }
