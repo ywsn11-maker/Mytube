@@ -139,14 +139,21 @@
   /* player modal */
   #player-modal{position:fixed;inset:0;background:#000;z-index:50;display:flex;flex-direction:column;}
   #player-modal[hidden]{display:none;}
-  .player-top{display:flex;justify-content:flex-end;padding:10px 12px;
+  .player-top{display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;
     padding-top:calc(10px + env(safe-area-inset-top));}
   .player-top button{background:rgba(255,255,255,.08);border:none;color:#fff;width:36px;height:36px;
-    border-radius:50%;font-size:18px;cursor:pointer;}
+    border-radius:50%;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
   .player-frame{flex:1;display:flex;align-items:center;}
   .player-frame iframe{width:100%;aspect-ratio:16/9;border:none;}
 
   ::-webkit-scrollbar{display:none;}
+
+  #toast{position:fixed;left:50%;bottom:32px;transform:translate(-50%,12px);
+    background:#222228;color:var(--text);border:1px solid var(--line);border-radius:10px;
+    padding:10px 16px;font-size:13.5px;z-index:80;opacity:0;pointer-events:none;
+    transition:opacity .18s ease, transform .18s ease;
+    padding-bottom:calc(10px + env(safe-area-inset-bottom));}
+  #toast.show{opacity:1;transform:translate(-50%,0);}
 </style>
 </head>
 <body>
@@ -226,9 +233,19 @@
 </div>
 
 <div id="player-modal" hidden>
-  <div class="player-top"><button id="player-close" aria-label="닫기">✕</button></div>
+  <div class="player-top">
+    <button id="player-copy" aria-label="링크 복사">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </button>
+    <button id="player-share" aria-label="공유">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>
+    </button>
+    <button id="player-close" aria-label="닫기">✕</button>
+  </div>
   <div class="player-frame"><iframe id="player-iframe" allow="autoplay; fullscreen; encrypted-media" allowfullscreen playsinline></iframe></div>
 </div>
+
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 (function(){
@@ -532,7 +549,7 @@
     Array.prototype.forEach.call(listEl.querySelectorAll(".card"), function(card){
       card.addEventListener("click", function(){
         var v = list[parseInt(card.getAttribute("data-idx"), 10)];
-        if(v) openPlayer(v.videoId);
+        if(v) openPlayer(v.videoId, v.title);
       });
     });
   }
@@ -610,7 +627,10 @@
   }
 
   // ---------- player ----------
-  function openPlayer(videoId){
+  var currentVideo = null; // { videoId, title }
+
+  function openPlayer(videoId, title){
+    currentVideo = { videoId: videoId, title: title || "" };
     var src = "https://www.youtube.com/embed/" + videoId +
       "?autoplay=1&rel=0&modestbranding=1&iv_load_policy=3&playsinline=1";
     $("player-iframe").src = src;
@@ -619,6 +639,40 @@
   function closePlayer(){
     $("player-iframe").src = "";
     $("player-modal").hidden = true;
+    currentVideo = null;
+  }
+  function currentVideoUrl(){
+    return currentVideo ? ("https://www.youtube.com/watch?v=" + currentVideo.videoId) : null;
+  }
+  function shareCurrentVideo(){
+    var url = currentVideoUrl();
+    if(!url) return;
+    if(navigator.share){
+      navigator.share({ title: (currentVideo.title || "YouTube"), url: url }).catch(function(){});
+    } else {
+      copyCurrentVideoLink();
+    }
+  }
+  function copyCurrentVideoLink(){
+    var url = currentVideoUrl();
+    if(!url) return;
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).then(function(){
+        toast("링크를 복사했어요");
+      }).catch(function(){
+        window.prompt("이 링크를 복사하세요:", url);
+      });
+    } else {
+      window.prompt("이 링크를 복사하세요:", url);
+    }
+  }
+  function toast(text){
+    var el = $("toast");
+    if(!el) return;
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function(){ el.classList.remove("show"); }, 1800);
   }
 
   // ---------- tabs ----------
@@ -690,6 +744,8 @@
     });
 
     $("player-close").addEventListener("click", closePlayer);
+    $("player-share").addEventListener("click", shareCurrentVideo);
+    $("player-copy").addEventListener("click", copyCurrentVideoLink);
 
     if("serviceWorker" in navigator){
       navigator.serviceWorker.register("service-worker.js").catch(function(){});
